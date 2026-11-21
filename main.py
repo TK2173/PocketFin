@@ -1,4 +1,113 @@
-fastapi 
-uvicorn 
-aiogram 
-httpx
+import os
+import asyncio
+import xml.etree.ElementTree as ET
+import httpx
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
+import uvicorn
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://example.com")
+PORT = int(os.getenv("PORT", 8000))
+
+app = FastAPI()
+bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
+dp = Dispatcher()
+
+
+def calculate_rsi(closes: list[float], period: int = 14) -> float:
+    if len(closes) < period + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 1)
+
+
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
+
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_webapp():
+    with open("index.html", "r", encoding="utf-8") as f:
+        return f.read()
+
+
+@app.get("/api/market")
+async def get_market_data():
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        # Курс USD от ЦБ РФ
+        cbr_resp = await client.get("https://cbr.ru")
+        root = ET.fromstring(cbr_resp.text)
+        usd_rate = "—"
+        for valute in root.findall("Valute"):
+            if valute.find("CharCode").text == "USD":
+                usd_rate = valute.find("Value").text
+
+        # Свечи BTC/USDT с Bybit (часовые, последние 50 свечей)
+        bybit_resp = await client.get("https://bybit.com")
+        klines = bybit_resp.json()["result"]["list"][::-1]
+        candles = []
+        closes = []
+        for k in klines:
+            close_price = float(k)
+            closes.append(close_price)
+            candles.append({
+                "time": int(k) // 1000,
+                "open": float(k),
+                "high": float(k),
+                "low": float(k),
+                "close": close_price
+            })
+
+        current_rsi = calculate_rsi(closes)
+        if current_rsi > 70:
+            signal = "Перекуплен (высокий риск коррекции)"
+        elif current_rsi < 30:
+            signal = "Перепродан (возможен отскок вверх)"
+        else:
+            signal = "Нейтральный тренд (баланс сил)"
+
+        return {
+            "btc_price": closes[-1],
+            "usd_cbr": usd_rate,
+            "rsi": current_rsi,
+            "signal": signal,
+            "candles": candles
+        }
+
+
+@app.message(Command("start"))
+async def cmd_start(message: types.Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📊 Открыть аналитику рынка", web_app=WebAppInfo(url=WEBAPP_URL))
+    ]])
+    await message.answer(
+        "Добро пожаловать! Нажмите кнопку ниже, чтобы открыть живые графики и анализ рынка:",
+        reply_markup=kb
+    )
+
+
+async def main():
+    config = uvicorn.Config(app, host="0.0.0.0", port=PORT)
+    server = uvicorn.Server(config)
+    if bot:
+        await asyncio.gather(server.serve(), dp.start_polling(bot))
+    else:
+        await server.serve()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
