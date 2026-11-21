@@ -252,8 +252,6 @@ async def cmd_start(message: types.Message):
 
 async def main():
 
-async def main():
-
     config = uvicorn.Config(
         app,
         host="0.0.0.0",
