@@ -252,6 +252,44 @@ async def cmd_start(message: types.Message):
 
 async def main():
 
+async def main():
+
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=PORT
+    )
+
+    server = uvicorn.Server(config)
+
+    if not bot:
+        print("BOT_TOKEN отсутствует. Запускаем только API.")
+        await server.serve()
+        return
+
+    try:
+        await bot.get_me()
+    except Exception as error:
+        print(
+            "Telegram bot authorization failed:",
+            type(error).__name__
+        )
+        await bot.session.close()
+        await server.serve()
+        return
+
+    try:
+        await asyncio.gather(
+            server.serve(),
+            dp.start_polling(bot)
+        )
+    finally:
+        await bot.session.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
     config = uvicorn.Config(
         app,
         host="0.0.0.0",
